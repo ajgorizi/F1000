@@ -1,0 +1,750 @@
+---
+title: "f1000 R codes for upload"
+author: "Amirsalar Jafari Gorizi"
+date: "2026-01-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Set directory
+```{r}
+out_dir <- "/Users/amirsalarjafarigorizi/Downloads/"
+```
+
+## Libraries
+```{r}
+# ---- Packages: install if missing, then load ----
+req <- c(
+  "dplyr",
+  "stringr",
+  "strucchange",
+  "ggplot2",
+  "tidyr",
+  "readr",
+  "lubridate",
+  "CausalImpact",
+  "zoo",
+  "forecast",
+  "tseries"
+)
+
+to_install <- setdiff(req, rownames(installed.packages()))
+if (length(to_install) > 0) {
+  install.packages(to_install, repos = "https://cloud.r-project.org")
+}
+
+invisible(lapply(req, library, character.only = TRUE))
+
+
+```
+
+# Bai-Parron scores combined chart
+```{r cars}
+# 1. Load your data
+scores <- read.csv("scores.csv")
+
+# 2. Define your variables and formatted labels
+vars <- c("share_flag_fdg", "share_flag_lrr", "share_flag_imbd")
+
+# 3. Initialize data frames to store results for plotting
+plot_data_raw    <- data.frame() # NEW: To store the raw time series
+plot_data_fitted <- data.frame() # To store the step-function lines
+plot_breaks      <- data.frame() # To store the vertical break lines
+
+# 4. Loop through each variable to calculate breaks
+for (v in vars) {
+  if (!v %in% names(scores)) {
+    cat("⚠️ Variable not found:", v, "\n")
+    next
+  }
+  
+  # Prepare Time Series
+  data_series <- scores[[v]]
+  data_ts <- ts(data_series, start = 2012, frequency = 1)
+  
+  # --- Step A: Save Raw Data for Plotting ---
+  temp_raw <- data.frame(
+    year = as.numeric(time(data_ts)),
+    value = as.numeric(data_series),
+    variable = v
+  )
+  plot_data_raw <- rbind(plot_data_raw, temp_raw)
+  
+  # --- Step B: Fit Bai–Perron model ---
+  bp_model <- try(breakpoints(data_ts ~ 1, h = 0.15), silent = TRUE)
+  
+  if (inherits(bp_model, "try-error")) {
+    cat("❌ Model failed for:", v, "\n")
+    next
+  }
+  
+  # --- Step C: Determine optimal number of breaks (BIC) ---
+  if (!is.null(bp_model$BIC) && length(bp_model$BIC) > 0) {
+    opt_breaks <- which.min(bp_model$BIC) - 1
+  } else {
+    opt_breaks <- 0
+  }
+  
+  # --- Step D: Refit final model ---
+  if (opt_breaks > 0) {
+    bp_final <- breakpoints(data_ts ~ 1, breaks = opt_breaks)
+  } else {
+    bp_final <- bp_model
+  }
+  
+  # --- Step E: Extract Fitted Data ---
+  fitted_vals <- fitted(bp_final)
+  temp_fit <- data.frame(
+    year = as.numeric(time(data_ts)),
+    value = as.numeric(fitted_vals),
+    variable = v
+  )
+  plot_data_fitted <- rbind(plot_data_fitted, temp_fit)
+  
+  # --- Step F: Extract Breakpoints (if any) ---
+  if (!is.null(bp_final$breakpoints) && any(!is.na(bp_final$breakpoints))) {
+    break_years <- time(data_ts)[bp_final$breakpoints]
+    temp_breaks <- data.frame(
+      break_year = as.numeric(break_years),
+      variable = v
+    )
+    plot_breaks <- rbind(plot_breaks, temp_breaks)
+  }
+}
+
+# 5. Create the Combined Plot
+p <- ggplot() +
+  
+  # LAYER 1: Raw Data (Faint lines)
+  geom_line(data = plot_data_raw, 
+            aes(x = year, y = value, color = variable), 
+            alpha = 0.4, linewidth = 0.8, linetype = "solid") +
+  
+  # LAYER 2: Fitted Trends (Bold Step Lines)
+  geom_line(data = plot_data_fitted, 
+            aes(x = year, y = value, color = variable), 
+            linewidth = 1.2) +
+  
+  geom_vline(data = plot_breaks %>% 
+               mutate(nudge = case_when(
+                 variable == "share_flag_fdg"  ~ -0.12,
+                 variable == "share_flag_lrr"  ~ 0,
+                 variable == "share_flag_imbd" ~ 0.12,
+                 TRUE ~ 0
+               )), 
+             aes(xintercept = break_year + nudge, color = variable), 
+             linetype = "dashed", linewidth = 0.8, alpha = 0.8) +
+  
+  # Styling and Legend
+  scale_x_continuous(breaks = 2012:2025) + 
+  scale_color_manual(
+    # 1. Define the specific variables
+    breaks = c("share_flag_fdg", "share_flag_lrr", "share_flag_imbd"),
+    
+    # 2. Assign the exact colors you requested
+    values = c("share_flag_fdg" = "#4c72b0",  # Blue (Homogeneity)
+               "share_flag_lrr" = "#dd8452",  # Orange (Conventionality)
+               "share_flag_imbd" = "#55a868"), # Green (Predictability)
+               
+    # 3. Label them in the legend
+    labels = c("Syntactic Homogeneity", "Lexical Conventionality", "Rhythmic Predictability"),
+    name = "Indicator"
+  ) +
+  labs(
+    title = "Structural Breaks in Flagged Proportion of Abstracts",
+    subtitle = "Faint lines = Raw scores; Bold lines = Structural means, Vertical dashed lines = Structural breaks",
+    y = "Share Value",
+    x = "Year"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank(),
+    plot.title = element_text(face="bold")
+  )
+
+# 6. Output
+print(p)
+
+ggsave("bai_perron_scores.png", plot = p, width = 10, height = 6)
+```
+
+## Bai-Parron scores combined "Infectious Disease & Crisis" & "General Scientific Corpus"
+```{r}
+
+# 1. Load your raw data
+# Assuming your raw dataset is named 'raw_data'
+raw_data <- read.csv("/Users/amirsalarjafarigorizi/Downloads/f1000_unique_scored.csv")
+
+# 2. Categorize
+crisis_keywords <- "covid|sars-cov-2|coronavirus|pandemic|epidemic|outbreak|h1n1|zika|ebola|influenza|virus|pathogen|infectious disease|public health emergency"
+
+processed_data <- raw_data %>%
+  mutate(category = ifelse(
+    str_detect(tolower(title), crisis_keywords) | 
+    str_detect(tolower(abstract), crisis_keywords),
+    "Infectious Disease & Crisis",  # The Control Group (Historically Rigid?)
+    "General Scientific Corpus"     # The Treatment Group (GPT-3 Affected?)
+  ))
+
+# 3. Calculate Yearly Shares (Proportions) for the flag columns
+scores_long <- processed_data %>%
+  group_by(publication_year, category) %>%
+  summarise(
+    share_flag_fdg = mean(flag_llm_fdg, na.rm = TRUE),
+    share_flag_lrr = mean(flag_llm_lrr, na.rm = TRUE),
+    share_flag_imbd = mean(flag_llm_imbd, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# 4. Initialize storage for Bai-Perron results
+vars <- c("share_flag_fdg", "share_flag_lrr", "share_flag_imbd")
+plot_data_raw    <- data.frame()
+plot_data_fitted <- data.frame()
+plot_breaks      <- data.frame()
+
+# 5. Loop through Categories and Variables to calculate breaks
+categories <- unique(scores_long$category)
+
+for (cat_name in categories) {
+  cat_data <- scores_long %>% filter(category == cat_name)
+  
+  for (v in vars) {
+    # Prepare Time Series for this category
+    data_series <- cat_data[[v]]
+    # Adjust start year based on your data range for that specific category
+    start_yr <- min(cat_data$publication_year)
+    data_ts <- ts(data_series, start = start_yr, frequency = 1)
+    
+    # Save Raw Data
+    temp_raw <- data.frame(
+      year = as.numeric(time(data_ts)),
+      value = as.numeric(data_series),
+      variable = v,
+      category = cat_name
+    )
+    plot_data_raw <- rbind(plot_data_raw, temp_raw)
+    
+    # Fit Bai–Perron model
+    # h=0.15 ensures we have enough observations between breaks
+    bp_model <- try(breakpoints(data_ts ~ 1, h = 0.15), silent = TRUE)
+    
+    if (inherits(bp_model, "try-error")) next
+    
+    # Determine optimal number of breaks (BIC)
+    opt_breaks <- if(!is.null(bp_model$BIC)) which.min(bp_model$BIC) - 1 else 0
+    
+    # Refit final model
+    bp_final <- if(opt_breaks > 0) breakpoints(data_ts ~ 1, breaks = opt_breaks) else bp_model
+    
+    # Extract Fitted Data
+    fitted_vals <- fitted(bp_final)
+    temp_fit <- data.frame(
+      year = as.numeric(time(data_ts)),
+      value = as.numeric(fitted_vals),
+      variable = v,
+      category = cat_name
+    )
+    plot_data_fitted <- rbind(plot_data_fitted, temp_fit)
+    
+    # Extract Breakpoints
+    if (!is.null(bp_final$breakpoints) && any(!is.na(bp_final$breakpoints))) {
+      break_years <- time(data_ts)[bp_final$breakpoints]
+      temp_breaks <- data.frame(
+        break_year = as.numeric(break_years),
+        variable = v,
+        category = cat_name
+      )
+      plot_breaks <- rbind(plot_breaks, temp_breaks)
+    }
+  }
+}
+
+# 6. Create the Faceted Plot
+p <- ggplot() +
+  # LAYER 1: Raw Data
+  geom_line(data = plot_data_raw, 
+            aes(x = year, y = value, color = variable), 
+            alpha = 0.3, linewidth = 0.7) +
+  
+  # LAYER 2: Fitted Trends
+  geom_line(data = plot_data_fitted, 
+            aes(x = year, y = value, color = variable), 
+            linewidth = 1.2) +
+  
+  # LAYER 3: Vertical Break Lines (with category-specific nudging)
+  geom_vline(data = plot_breaks %>% 
+               mutate(nudge = case_when(
+                 variable == "share_flag_fdg"  ~ -0.15,
+                 variable == "share_flag_lrr"  ~ 0,
+                 variable == "share_flag_imbd" ~ 0.15,
+                 TRUE ~ 0
+               )), 
+             aes(xintercept = break_year + nudge, color = variable), 
+             linetype = "dashed", linewidth = 0.6, alpha = 0.7) +
+  
+  # Faceting by Category
+  facet_wrap(~category, scales = "free_y") +
+  
+  # Styling
+  scale_x_continuous(breaks = seq(2012, 2025, by = 2)) + 
+  scale_color_manual(
+    values = c("share_flag_fdg" = "#4c72b0", 
+               "share_flag_lrr" = "#dd8452", 
+               "share_flag_imbd" = "#55a868"),
+    labels = c("Fast-DetectGPT (FDG)", "Log-Rank (LRR)", "IMBD Classifier"),
+    name = "LLM Detector"
+  ) +
+  labs(
+    y = "Proportion of Abstracts Flagged",
+    x = "Year"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom", plot.title = element_text(face="bold"))
+
+print(p)
+```
+## Bai-Parron recommendations combined chart
+```{r}
+# 1. Load data
+recommendations <- read.csv(
+  "/Users/amirsalarjafarigorizi/Downloads/f1000_unique_scored.csv"
+)
+
+# 2. Compute yearly percentages (overall, no categories)
+recommendations_trend <- recommendations %>%
+  group_by(publication_year, reviewer_recommendation) %>%
+  summarise(count = n(), .groups = "drop") %>%
+  group_by(publication_year) %>%
+  mutate(percentage = (count / sum(count)) * 100) %>%
+  ungroup()
+
+# 3. Setup
+vars <- c("reject", "approve", "approve-with-reservations")
+
+plot_data_raw    <- data.frame()
+plot_data_fitted <- data.frame()
+plot_breaks      <- data.frame()
+
+# 4. Loop through recommendation types
+for (v in vars) {
+
+  v_data <- recommendations_trend %>%
+    filter(reviewer_recommendation == v) %>%
+    arrange(publication_year)
+
+  # Skip if too little data
+  if (nrow(v_data) < 5) next
+
+  # Create time series
+  data_ts <- ts(
+    v_data$percentage,
+    start = min(v_data$publication_year),
+    frequency = 1
+  )
+
+  # --- Save raw data ---
+  plot_data_raw <- rbind(
+    plot_data_raw,
+    data.frame(
+      year = as.numeric(time(data_ts)),
+      value = as.numeric(data_ts),
+      variable = v
+    )
+  )
+
+  # --- Bai–Perron model ---
+  bp_model <- try(breakpoints(data_ts ~ 1, h = 0.15), silent = TRUE)
+  if (inherits(bp_model, "try-error")) next
+
+  opt_breaks <- if (!is.null(bp_model$BIC)) {
+    which.min(bp_model$BIC) - 1
+  } else {
+    0
+  }
+
+  bp_final <- if (opt_breaks > 0) {
+    breakpoints(data_ts ~ 1, breaks = opt_breaks)
+  } else {
+    bp_model
+  }
+
+  # --- Fitted values ---
+  plot_data_fitted <- rbind(
+    plot_data_fitted,
+    data.frame(
+      year = as.numeric(time(data_ts)),
+      value = as.numeric(fitted(bp_final)),
+      variable = v
+    )
+  )
+
+  # --- Breakpoints ---
+  if (!is.null(bp_final$breakpoints) && any(!is.na(bp_final$breakpoints))) {
+    plot_breaks <- rbind(
+      plot_breaks,
+      data.frame(
+        break_year = as.numeric(time(data_ts)[bp_final$breakpoints]),
+        variable = v
+      )
+    )
+  }
+}
+
+# 5. Plot
+p <- ggplot() +
+  geom_line(
+    data = plot_data_raw,
+    aes(x = year, y = value, color = variable),
+    alpha = 0.35,
+    linewidth = 0.8
+  ) +
+  geom_line(
+    data = plot_data_fitted,
+    aes(x = year, y = value, color = variable),
+    linewidth = 1.2
+  ) +
+  geom_vline(
+    data = plot_breaks,
+    aes(xintercept = break_year, color = variable),
+    linetype = "dashed",
+    alpha = 0.8
+  ) +
+  scale_color_manual(
+    values = c(
+      "reject" = "#e74c3c",
+      "approve" = "#2ecc71",
+      "approve-with-reservations" = "#3498db"
+    ),
+    name = "Recommendation"
+  ) +
+  labs(
+    title = "Structural Breaks in Reviewer Recommendations",
+    subtitle = "Raw yearly percentages and Bai–Perron step means",
+    x = "Publication Year",
+    y = "Percentage (%)"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    panel.grid.minor = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+
+print(p)
+
+
+# Optional: Save
+ggsave("/Users/amirsalarjafarigorizi/Documents/bai_perron_reviews.png", plot = p, width = 10, height = 6)
+```
+
+## Bai-Parron recommendations combined "Infectious Disease & Crisis" & "General Scientific Corpus"
+```{r}
+# 1. Load your raw data
+# Ensure your CSV has: publication_year, reviewer_recommendation, and abstract
+raw_data <- read.csv("/Users/amirsalarjafarigorizi/Downloads/f1000_unique_scored.csv")
+
+# 2. Categorize based on Abstract Keywords
+crisis_keywords <- "covid|sars-cov-2|coronavirus|pandemic|epidemic|outbreak|h1n1|zika|ebola|influenza|virus|pathogen|infectious disease|public health emergency"
+
+processed_data <- raw_data %>%
+  mutate(category = ifelse(
+    str_detect(tolower(abstract), crisis_keywords),
+    "Infectious Disease & Crisis", 
+    "General Scientific Corpus"
+  ))
+
+# 3. Calculate Yearly Percentages for Recommendations per Category
+# This matches your 'trend_percent' logic: (count / yearly total) * 100
+recommendations_trend <- processed_data %>%
+  group_by(publication_year, category, reviewer_recommendation) %>%
+  summarise(count = n(), .groups = 'drop') %>%
+  group_by(publication_year, category) %>%
+  mutate(percentage = (count / sum(count)) * 100) %>%
+  ungroup()
+
+# 4. Initialize storage for plotting
+vars <- c("approve", "reject", "approve-with-reservations")
+plot_data_raw    <- data.frame()
+plot_data_fitted <- data.frame()
+plot_breaks      <- data.frame()
+categories       <- unique(recommendations_trend$category)
+
+# 5. Loop through Categories and Recommendation Types
+for (cat_name in categories) {
+  for (v in vars) {
+    # Filter data for specific recommendation type in specific group
+    cat_v_data <- recommendations_trend %>% 
+      filter(category == cat_name, reviewer_recommendation == v) %>%
+      arrange(publication_year)
+    
+    if(nrow(cat_v_data) < 5) next # Skip if not enough data points
+    
+    # Create Time Series
+    data_ts <- ts(cat_v_data$percentage, start = min(cat_v_data$publication_year), frequency = 1)
+    
+    # Save Raw Data
+    plot_data_raw <- rbind(plot_data_raw, data.frame(
+      year = as.numeric(time(data_ts)),
+      value = as.numeric(data_ts),
+      variable = v,
+      category = cat_name
+    ))
+    
+    # --- Bai-Perron Modeling ---
+    bp_model <- try(breakpoints(data_ts ~ 1, h = 0.15), silent = TRUE)
+    if (inherits(bp_model, "try-error")) next
+    
+    opt_breaks <- if(!is.null(bp_model$BIC)) which.min(bp_model$BIC) - 1 else 0
+    bp_final <- if(opt_breaks > 0) breakpoints(data_ts ~ 1, breaks = opt_breaks) else bp_model
+    
+    # Extract Fitted Trends
+    plot_data_fitted <- rbind(plot_data_fitted, data.frame(
+      year = as.numeric(time(data_ts)),
+      value = as.numeric(fitted(bp_final)),
+      variable = v,
+      category = cat_name
+    ))
+    
+    # Extract Breakpoints
+    if (!is.null(bp_final$breakpoints) && any(!is.na(bp_final$breakpoints))) {
+      plot_breaks <- rbind(plot_breaks, data.frame(
+        break_year = as.numeric(time(data_ts)[bp_final$breakpoints]),
+        variable = v,
+        category = cat_name
+      ))
+    }
+  }
+}
+
+# 6. Faceted Plot Generation
+p <- ggplot() +
+  geom_line(data = plot_data_raw, aes(x = year, y = value, color = variable), alpha = 0.3) +
+  geom_line(data = plot_data_fitted, aes(x = year, y = value, color = variable), linewidth = 1.2) +
+  geom_vline(data = plot_breaks, aes(xintercept = break_year, color = variable), 
+             linetype = "dashed", alpha = 0.8) +
+  facet_wrap(~category) +
+  scale_color_manual(values = c("reject" = "#e74c3c", "approve" = "#2ecc71", "approve-with-reservations" = "#3498db")) +
+  labs(title = "Reviewer Recommendation Trends by Research Category",
+       y = "Percentage of Total Yearly Submissions (%)", x = "Year") +
+  theme_minimal() + theme(legend.position = "bottom")
+
+print(p)
+```
+
+
+## Causal Impact Analysis (scores)
+```{r}
+# =========================================================
+# F1000 AI-impact analyses (R)
+# CausalImpact on AI-detection shares pre/post ChatGPT
+# =========================================================
+
+# ---- 1. Inputs ----
+ts_path <- "/Users/amirsalarjafarigorizi/Downloads/csv_files/f1000_scores.csv"
+
+if (!file.exists(ts_path)) {
+  stop("Missing f1000_scores.csv")
+}
+
+ts <- read_csv(ts_path, show_col_types = FALSE) %>%
+  mutate(date = ymd(paste0(publication_year, "-07-01"))) %>%
+  arrange(date)
+
+# ---- 2. Intervention window ----
+pre_period  <- c(min(ts$date), as.Date("2022-12-31"))
+post_period <- c(as.Date("2023-01-01"), max(ts$date))
+
+# =========================================================
+# FDG causal
+# =========================================================
+if (!"share_flag_fdg" %in% names(ts)) stop("Missing share_flag_fdg")
+
+z_fdg <- zoo(ts$share_flag_fdg, order.by = ts$date)
+impact_fdg <- CausalImpact(z_fdg, pre.period = pre_period, post.period = post_period)
+
+print(impact_fdg)
+plot(impact_fdg)
+
+png(
+  filename = paste0(out_dir, "causal_impact_fdg.png"),
+  width = 800,
+  height = 600
+)
+plot(impact_fdg)
+dev.off()
+
+
+sink(paste0(out_dir, "causal_impact_summary_fdg.txt"))
+cat(capture.output(summary(impact_fdg, "report")), sep = "\n")
+sink()
+
+# =========================================================
+# LRR causal
+# =========================================================
+if (!"share_flag_lrr" %in% names(ts)) stop("Missing share_flag_lrr")
+
+z_lrr <- zoo(ts$share_flag_lrr, order.by = ts$date)
+impact_lrr <- CausalImpact(z_lrr, pre.period = pre_period, post.period = post_period)
+
+print(impact_lrr)
+plot(impact_lrr)
+
+png(
+  filename = paste0(out_dir, "causal_impact_lrr.png"),
+  width = 800,
+  height = 600
+)
+plot(impact_lrr)
+dev.off()
+
+
+sink(paste0(out_dir, "causal_impact_summary_lrr.txt"))
+cat(capture.output(summary(impact_lrr, "report")), sep = "\n")
+sink()
+
+# =========================================================
+# ImBD causal
+# =========================================================
+if (!"share_flag_imbd" %in% names(ts)) stop("Missing share_flag_imbd")
+
+z_imbd <- zoo(ts$share_flag_imbd, order.by = ts$date)
+impact_imbd <- CausalImpact(z_imbd, pre.period = pre_period, post.period = post_period)
+
+print(impact_imbd)
+plot(impact_imbd)
+
+png(
+  filename = paste0(out_dir, "causal_impact_imbd.png"),
+  width = 800,
+  height = 600
+)
+plot(impact_imbd)
+dev.off()
+
+
+sink(paste0(out_dir, "causal_impact_summary_imbd.txt"))
+cat(capture.output(summary(impact_imbd, "report")), sep = "\n")
+sink()
+
+```
+## Causal Impact Analysis (recommendations)
+```{r}
+# =========================================================
+# F1000 Recommendation Trends → CausalImpact Analyses
+# Approve / Approve-with-reservations / Reject
+# =========================================================
+
+# ---- 1. Load and construct input data ----
+csv_path <- "/Users/amirsalarjafarigorizi/Downloads/f1000_unique_scored.csv"
+
+if (!file.exists(csv_path)) {
+  stop("Input file not found: f1000_scored.csv")
+}
+
+# Read raw data
+scored_all <- read_csv(csv_path, show_col_types = FALSE)
+
+# Drop missing year or recommendation
+scored_all <- scored_all %>%
+  filter(!is.na(publication_year),
+         !is.na(reviewer_recommendation))
+
+# Count recommendations per year
+trend <- scored_all %>%
+  group_by(publication_year, reviewer_recommendation) %>%
+  summarise(count = n(), .groups = "drop")
+
+# Wide format: one column per recommendation type
+trend_wide <- trend %>%
+  pivot_wider(
+    names_from  = reviewer_recommendation,
+    values_from = count,
+    values_fill = 0
+  )
+
+# Convert counts to yearly percentages
+trend_percent <- trend_wide %>%
+  mutate(total = rowSums(across(-publication_year))) %>%
+  mutate(across(
+    -c(publication_year, total),
+    ~ .x / total * 100
+  )) %>%
+  select(-total)
+
+# ---- 2. Prepare time series ----
+ts_data <- trend_percent %>%
+  mutate(date = ymd(paste0(publication_year, "-07-01"))) %>%
+  arrange(date)
+
+# ---- 3. Intervention window ----
+pre_period  <- c(min(ts_data$date), as.Date("2022-12-31"))
+post_period <- c(as.Date("2023-01-01"), max(ts_data$date))
+
+# =========================================================
+# Approve
+# =========================================================
+if (!"approve" %in% names(ts_data)) stop("Missing approve column")
+
+z_approve <- zoo(ts_data$approve, order.by = ts_data$date)
+impact_approve <- CausalImpact(z_approve, pre_period, post_period)
+
+print(summary(impact_approve))
+
+png(paste0(out_dir, "causal_impact_approve.png"), 800, 600)
+plot(impact_approve)
+dev.off()
+
+sink(paste0(out_dir, "causal_impact_approve_summary.txt"))
+cat(capture.output(summary(impact_approve, "report")), sep = "\n")
+sink()
+
+# =========================================================
+# Approve with reservations
+# =========================================================
+if (!"approve-with-reservations" %in% names(ts_data)) {
+  stop("Missing approve-with-reservations column")
+}
+
+z_res <- zoo(
+  ts_data$`approve-with-reservations`,
+  order.by = ts_data$date
+)
+impact_res <- CausalImpact(z_res, pre_period, post_period)
+
+print(summary(impact_res))
+
+png(
+  paste0(out_dir, "causal_impact_approve_with_reservations.png"),
+  800, 600
+)
+plot(impact_res)
+dev.off()
+
+sink(paste0(out_dir, "causal_impact_approve_with_reservations_summary.txt"))
+cat(capture.output(summary(impact_res, "report")), sep = "\n")
+sink()
+
+# =========================================================
+# Reject
+# =========================================================
+if (!"reject" %in% names(ts_data)) stop("Missing reject column")
+
+z_reject <- zoo(ts_data$reject, order.by = ts_data$date)
+impact_reject <- CausalImpact(z_reject, pre_period, post_period)
+
+print(summary(impact_reject))
+
+png(paste0(out_dir, "causal_impact_reject.png"), 800, 600)
+plot(impact_reject)
+dev.off()
+
+sink(paste0(out_dir, "causal_impact_reject_summary.txt"))
+cat(capture.output(summary(impact_reject, "report")), sep = "\n")
+sink()
+
+```
+
